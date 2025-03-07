@@ -1,0 +1,13 @@
+,Preposition,Accuracy,Count,Dataset,Model,Seed
+0,left_of,0.0,20,Controlled_Images_A,NegCLIP_finetuned,1
+1,on,0.8571428571428571,21,Controlled_Images_A,NegCLIP_finetuned,1
+2,right_of,0.0476190476190476,21,Controlled_Images_A,NegCLIP_finetuned,1
+3,under,0.0952380952380952,21,Controlled_Images_A,NegCLIP_finetuned,1
+0,left_of,0.0,20,Controlled_Images_A,NegCLIP_finetuned,1
+1,on,0.8571428571428571,21,Controlled_Images_A,NegCLIP_finetuned,1
+2,right_of,0.0476190476190476,21,Controlled_Images_A,NegCLIP_finetuned,1
+3,under,0.0952380952380952,21,Controlled_Images_A,NegCLIP_finetuned,1
+0,left_of,0.25,20,Controlled_Images_A,NegCLIP_finetuned,1
+1,on,0.047619047619047616,21,Controlled_Images_A,NegCLIP_finetuned,1
+2,right_of,0.2857142857142857,21,Controlled_Images_A,NegCLIP_finetuned,1
+3,under,0.42857142857142855,21,Controlled_Images_A,NegCLIP_finetuned,1
