@@ -1,4 +1,4 @@
-giimport warnings
+import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -68,6 +68,7 @@ def load_negclip_model(device_str, root_dir=CACHE_DIR):
     # Get appropriate device
     device = get_device(device_str)
     path = os.path.join(root_dir, "negclip.pth")
+    path = "/Users/itazaporozhets/VSCode/whatsup_vlms_og/data/negclip.pth"
     if not os.path.exists(path):
         print("Downloading the NegCLIP model...")
         import gdown
@@ -76,16 +77,12 @@ def load_negclip_model(device_str, root_dir=CACHE_DIR):
     print("Loading NegCLIP weights...")
     state_dict = torch.load(path, map_location="cpu", weights_only=False)
     # Create model on CPU first
-    model, _, image_preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained=None, device="cpu")
+    model, _, image_preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained=path, device="cpu")
     model.load_state_dict(state_dict, strict=False)
 
-    # Freeze most of the model to prevent catastrophic forgetting
-    print("Freezing most model parameters...")
     for name, param in model.named_parameters():
         param.requires_grad = False
 
-    # Only train the last layer of the text encoder
-    print("Enabling training for specific layers...")
     for name, param in model.named_parameters():
         if 'ln_final' in name or 'text_projection' in name:
             param.requires_grad = True
@@ -99,10 +96,6 @@ def load_negclip_model(device_str, root_dir=CACHE_DIR):
     return clip_model, image_preprocess, device
 
 def train_negclip_on_controlled_images(model, train_loader, optimizer, device, epochs, output_dir, args):
-    """
-    Fine-tune the NegCLIP model on the Controlled_Images dataset.
-    For each image, the correct caption is at index 0 out of 4 caption options.
-    """
 
     def contrastive_loss(logits, targets, margin=0.2):
         """
@@ -122,6 +115,8 @@ def train_negclip_on_controlled_images(model, train_loader, optimizer, device, e
 
         return margins.sum()
 
+    best_accuracy = 0.0
+
     for epoch in range(epochs):
         model.model.train()
         running_loss = 0.0
@@ -133,8 +128,6 @@ def train_negclip_on_controlled_images(model, train_loader, optimizer, device, e
         for batch in progress_bar:
             optimizer.zero_grad()
 
-            # In Controlled_Images, we have multiple images and for each image, we have 4 caption options
-            # The correct caption is always at index 0
             image = batch["image_options"][0]
             batch_size = 1
             total += batch_size
@@ -143,14 +136,26 @@ def train_negclip_on_controlled_images(model, train_loader, optimizer, device, e
             image_features = F.normalize(image_features, dim=1)
             caption_options = batch["caption_options"]
 
-            caption_tokenized = torch.cat([clip.tokenize(c) for c in caption_options])
+            # The first caption is the correct one
+            correct_caption = caption_options[0]
+
+            # Create a new list with the correct caption and all distractors
+            shuffled_captions = caption_options.copy()
+
+            # Shuffle the caption options
+            random.shuffle(shuffled_captions)
+
+            # Find where the correct caption ended up after shuffling
+            correct_idx = shuffled_captions.index(correct_caption)
+
+            # Now we have shuffled captions and know where the correct one is
+            caption_tokenized = torch.cat([clip.tokenize(c) for c in shuffled_captions])
             text_features = model.model.encode_text(caption_tokenized.to(device))
             text_features = F.normalize(text_features, dim=1)
 
             logits = 100 * (image_features @ text_features.T)
 
-            # Correct caption is always at index 0
-            targets = torch.zeros(batch_size, dtype=torch.long, device=device)
+            targets = torch.tensor([correct_idx], dtype=torch.long, device=device)
             loss = contrastive_loss(logits[0], targets)
 
             loss.backward()
@@ -169,30 +174,29 @@ def train_negclip_on_controlled_images(model, train_loader, optimizer, device, e
         epoch_acc = 100 * correct / total
         print(f"Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.2f}%")
 
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': epoch_loss,
-        }, f"checkpoint_epoch_{epoch + 1}.pt")
+        if epoch_acc > best_accuracy:
+            os.makedirs(output_dir, exist_ok=True)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_loss,
+                'accuracy': epoch_acc,
+            }, os.path.join(output_dir, f"checkpoint_epoch_{epoch + 1}.pt"))
 
     print("Training completed!")
 
     return model
 
-
 def evaluate_model(model, test_loader, device, dataset, args):
-    """
-    Evaluate the model on the test dataset
-    """
-    model.model.eval()  # Set the model to evaluation mode
+    model.model.eval()
     print("Evaluating model...")
 
     scores = model.get_retrieval_scores_batched(test_loader)
     result_records = dataset.evaluate_scores(scores)
 
     for record in result_records:
-        record.update({"Model": f"{args.model_name}_finetuned", "Dataset": args.dataset, "Seed": args.seed})
+        record.update({"Model": f"{args.model_name}_finetuned_contrastive", "Dataset": args.dataset, "Seed": args.seed, "Epoch": 10})
 
     output_file = os.path.join(args.output_dir, f"{args.dataset}_results_finetuned.csv")
     df = pd.DataFrame(result_records)
@@ -207,7 +211,6 @@ def evaluate_model(model, test_loader, device, dataset, args):
     if args.save_scores:
         save_scores(scores, args)
 
-    # Print the results for easy comparison
     print("\nEvaluation Results:")
     for record in result_records:
         print(f"Preposition: {record['Preposition']}, Accuracy: {record['Accuracy']:.4f}")
@@ -219,10 +222,8 @@ def main():
     args = config()
     seed_all(args.seed)
 
-    # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Load the NegCLIP model
     model, image_preprocess, device = load_negclip_model(args.device)
 
     train_dataset = get_dataset(
@@ -232,11 +233,10 @@ def main():
         split="train"
     )
 
-    # Set up dataloader
     train_loader = DataLoader(
         train_dataset,
         batch_size=1,  # Use batch size of 1 for this dataset structure
-        shuffle=False,
+        shuffle=True,
         num_workers=args.num_workers
     )
 
@@ -248,6 +248,9 @@ def main():
         download=False,
         split="test"
     )
+
+    for i, item in enumerate(test_dataset.dataset):
+        test_dataset.dataset[i]['caption_options'] = test_dataset.dataset[i]['caption_options'][:4]
 
     test_loader = DataLoader(
         test_dataset,

@@ -37,7 +37,7 @@ def config():
     parser.add_argument("--seed", default=1, type=int)
     parser.add_argument("--lr", default=5e-6, type=float)
     parser.add_argument("--weight-decay", default=0.2, type=float)
-    parser.add_argument("--epochs", default=20, type=int)
+    parser.add_argument("--epochs", default=10, type=int)
     parser.add_argument("--download", action="store_true", help="Download the dataset if it doesn't exist")
     parser.add_argument("--output-dir", default="./outputs", type=str)
     parser.add_argument("--save-scores", action="store_true", help="Whether to save the scores for analysis")
@@ -76,7 +76,7 @@ def load_negclip_model(device_str, root_dir=CACHE_DIR):
     print("Loading NegCLIP weights...")
     state_dict = torch.load(path, map_location="cpu", weights_only=False)
     # Create model on CPU first
-    model, _, image_preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained=None, device="cpu")
+    model, _, image_preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained="/Users/itazaporozhets/VSCode/whatsup_vlms_og/data/negclip.pth", device="cpu")
     model.load_state_dict(state_dict, strict=False)
 
     # Freeze most of the model to prevent catastrophic forgetting
@@ -122,6 +122,8 @@ def train_negclip_on_controlled_images(model, train_loader, optimizer, device, e
 
         return margins.sum()
 
+    best_accuracy = 0.0
+
     for epoch in range(epochs):
         model.model.train()
         running_loss = 0.0
@@ -143,14 +145,27 @@ def train_negclip_on_controlled_images(model, train_loader, optimizer, device, e
             image_features = F.normalize(image_features, dim=1)
             caption_options = batch["caption_options"]
 
-            caption_tokenized = torch.cat([clip.tokenize(c) for c in caption_options])
+            # The first caption is the correct one
+            correct_caption = caption_options[0]
+
+            # Create a new list with the correct caption and all distractors
+            shuffled_captions = caption_options.copy()
+
+            # Shuffle the caption options
+            random.shuffle(shuffled_captions)
+
+            # Find where the correct caption ended up after shuffling
+            correct_idx = shuffled_captions.index(correct_caption)
+
+            # Now we have shuffled captions and know where the correct one is
+            caption_tokenized = torch.cat([clip.tokenize(c) for c in shuffled_captions])
             text_features = model.model.encode_text(caption_tokenized.to(device))
             text_features = F.normalize(text_features, dim=1)
 
             logits = 100 * (image_features @ text_features.T)
 
             # Correct caption is always at index 0
-            targets = torch.zeros(batch_size, dtype=torch.long, device=device)
+            targets = torch.tensor([correct_idx], dtype=torch.long, device=device)
             loss = contrastive_loss(logits[0], targets)
 
             loss.backward()
@@ -169,12 +184,15 @@ def train_negclip_on_controlled_images(model, train_loader, optimizer, device, e
         epoch_acc = 100 * correct / total
         print(f"Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.2f}%")
 
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': epoch_loss,
-        }, f"checkpoint_epoch_{epoch + 1}.pt")
+        if epoch_acc > best_accuracy:
+            os.makedirs(output_dir, exist_ok=True)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_loss,
+                'accuracy': epoch_acc,
+            }, os.path.join(output_dir, f"checkpoint_epoch.pt"))
 
     print("Training completed!")
 
@@ -192,7 +210,7 @@ def evaluate_model(model, test_loader, device, dataset, args):
     result_records = dataset.evaluate_scores(scores)
 
     for record in result_records:
-        record.update({"Model": f"{args.model_name}_finetuned", "Dataset": args.dataset, "Seed": args.seed})
+        record.update({"Model": f"{args.model_name}_finetuned_extra_negatives", "Dataset": args.dataset, "Seed": args.seed, "Epoch": 10})
 
     output_file = os.path.join(args.output_dir, f"{args.dataset}_results_finetuned.csv")
     df = pd.DataFrame(result_records)

@@ -70,6 +70,7 @@ class CLIPWrapper:
             and L is the number of caption options per the test case.
         """
         scores = []
+        self.device = 'cpu'
         tqdm_loader = tqdm(joint_loader)
         tqdm_loader.set_description("Computing retrieval scores")
         for batch in tqdm_loader:
